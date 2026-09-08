@@ -1,0 +1,93 @@
+name: Build IM Auto Reply V9
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-install-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "emulator" "system-images;android-35;google_apis;x86_64"
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Extract V9 project
+        run: |
+          rm -rf extracted-v9
+          mkdir extracted-v9
+          unzip -q IMWhatsAppAutoReply_V9.zip -d extracted-v9
+          echo "PROJECT_DIR=$(find extracted-v9 -name settings.gradle -printf '%h\n' | head -1)" >> "$GITHUB_ENV"
+
+      - name: Build standard debug APK
+        run: |
+          cd "$PROJECT_DIR"
+          gradle --no-daemon clean assembleDebug
+          test -f app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Verify APK package and signature
+        run: |
+          APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$AAPT" dump badging "$APK" | tee apk-badging.txt
+          grep -q "package: name='com.imintelligence.imautoreply'" apk-badging.txt
+          grep -q "versionCode='9'" apk-badging.txt
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee signature-verification.txt
+
+      - name: Emulator install and launch test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          script: |
+            APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+            adb install -r "$APK"
+            adb shell pm path com.imintelligence.imautoreply
+            adb shell am start -W -n com.imintelligence.imautoreply/.MainActivity
+            sleep 2
+            adb shell dumpsys activity activities | grep -q "com.imintelligence.imautoreply"
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p output
+          cp "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk" output/IM-Auto-Reply-V9.apk
+          cp apk-badging.txt output/
+          cp signature-verification.txt output/
+          cat > output/INSTALL-TEST.txt <<'EOF'
+          V9 GitHub emulator install test PASSED.
+          Package: com.imintelligence.imautoreply
+          Version: 9.0 (9)
+          Build: standard Gradle debug APK
+          Emulator: Android API 35
+          EOF
+
+      - name: Upload V9 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: IM-Auto-Reply-V9
+          path: output/*
+          if-no-files-found: error
